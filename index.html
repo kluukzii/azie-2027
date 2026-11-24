@@ -125,6 +125,7 @@ table.t tfoot td{font-weight:600;border-bottom:0}
 /* ---------- map ---------- */
 .map{height:min(70vh,520px);border-radius:var(--r-m);overflow:hidden;background:var(--surface-2);position:relative;z-index:0}
 .map .leaflet-container{font-family:var(--font-ui);background:var(--surface-2)}
+.map .tiles-dark{filter:invert(1) hue-rotate(180deg) brightness(.85) contrast(.9) saturate(.6)}
 .stop{width:26px;height:26px;border-radius:50%;background:var(--c);color:#fff;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;font:600 12px var(--font-display);cursor:pointer}
 .stop.big{width:32px;height:32px;font-size:13px}
 .leaflet-popup-content-wrapper{border-radius:var(--r-m);background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
@@ -415,7 +416,7 @@ function vOverzicht(){
     <div class="ribbon-tip" id="ribbonTip">Beweeg over de balk of tik op een blok om naar die dagen te springen.</div>
     <div class="ribbon-legend">${nbc.map(c=>`<span><i style="--c:var(${countryVar(c.country)})"></i>${esc(c.country)} <span class="muted">${c.nights}</span></span>`).join('')}</div>
   </div>
-  <div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Waar we slapen</h2><span class="muted small">${bl.filter(b=>coordsFor(b.days[0])&&!/nederland/i.test(b.country)).length} stops</span></div>
+  <div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Waar we slapen</h2><span class="muted small" id="mapCount"></span></div>
     <div class="map" id="map"></div><div class="map-note" id="mapNote"></div></div>
   <div class="grid cols-3" style="margin-bottom:14px">
     <div class="card"><h3>Vluchten</h3><div class="num" style="margin-top:8px">${booked}<small>van ${flights.length} geboekt</small></div>
@@ -443,19 +444,25 @@ function drawMap(bl,t){
   if(!window.L){ el.innerHTML='<div class="empty" style="border:0">Kaart kon niet laden (geen internet?)</div>'; return; }
   const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme:dark)').matches);
   const map=L.map(el,{scrollWheelZoom:false,attributionControl:true});
-  L.tileLayer(`https://{s}.basemaps.cartocdn.com/rastertiles/${dark?'dark_all':'voyager'}/{z}/{x}/{y}{r}.png`,{attribution:'© OpenStreetMap, © CARTO',maxZoom:18}).addTo(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap-bijdragers',maxZoom:18,className:dark?'tiles-dark':''}).addTo(map);
   const stops=bl.filter(b=>!/nederland/i.test(b.country)).map((b,i)=>({b,i:i+1,ll:coordsFor(b.days[0])})).filter(s=>s.ll);
   const missing=bl.filter(b=>!/nederland/i.test(b.country)&&!coordsFor(b.days[0])).map(b=>b.location);
   const style=getComputedStyle(document.documentElement);
   L.polyline(stops.map(s=>s.ll),{color:style.getPropertyValue('--ink').trim()||'#333',weight:2,opacity:.5,dashArray:'4 6'}).addTo(map);
-  stops.forEach(s=>{
-    const b=s.b, first=b.days[0], last=b.days[b.days.length-1], acc=[...new Set(b.days.map(x=>x.accommodation).filter(Boolean))], link=b.days.map(x=>x.link).find(Boolean), now=b.days.some(x=>x.date===t);
-    const icon=L.divIcon({className:'',html:`<div class="stop ${now?'big':''}" style="--c:var(${countryVar(b.country)})">${s.i}</div>`,iconSize:[26,26],iconAnchor:[13,13]});
-    L.marker(s.ll,{icon}).addTo(map).bindPopup(`<b>${esc(b.location)}</b><br>${esc(b.country)} · ${fmtDate(first.date)}${b.days.length>1?' – '+fmtDate(last.date):''} · ${b.days.length} ${b.days.length===1?'nacht':'nachten'}${acc.length?`<br>🛏 ${esc(acc.join(', '))}${b.days.some(x=>x.accBooked)?' ✓':''}`:'<br><span style="color:var(--muted)">Nog geen accommodatie</span>'}${link?`<br><a href="${esc(link)}" target="_blank" rel="noopener">Link ↗</a>`:''}<br><a href="#" data-jump="${b.start}">Open in planning</a>`);
+  // Dezelfde plek meerdere keren (Hanoi, Kota Kinabalu, Bali…) → één stip met alle bezoeken
+  const places=[]; const near=(a,b)=>Math.abs(a[0]-b[0])<0.05&&Math.abs(a[1]-b[1])<0.05;
+  stops.forEach(s=>{ const p=places.find(p=>near(p.ll,s.ll)); if(p) p.visits.push(s.b); else places.push({ll:s.ll,visits:[s.b],n:places.length+1}); });
+  places.forEach(p=>{
+    const b0=p.visits[0], now=p.visits.some(b=>b.days.some(x=>x.date===t)), nights=p.visits.reduce((a,b)=>a+b.days.length,0);
+    const icon=L.divIcon({className:'',html:`<div class="stop ${now?'big':''}" style="--c:var(${countryVar(b0.country)})">${p.n}</div>`,iconSize:[26,26],iconAnchor:[13,13]});
+    const visit=b=>{ const first=b.days[0], last=b.days[b.days.length-1], acc=[...new Set(b.days.map(x=>x.accommodation).filter(Boolean))], link=b.days.map(x=>x.link).find(Boolean);
+      return `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">${p.visits.length>1?`<strong>${esc(b.location)}</strong><br>`:''}${fmtDate(first.date)}${b.days.length>1?' – '+fmtDate(last.date):''} · ${b.days.length} ${b.days.length===1?'nacht':'nachten'}${acc.length?`<br>🛏 ${esc(acc.join(', '))}${b.days.some(x=>x.accBooked)?' ✓':''}`:'<br><span style="color:var(--muted)">Nog geen accommodatie</span>'}${link?` · <a href="${esc(link)}" target="_blank" rel="noopener">link ↗</a>`:''}<br><a href="#" data-jump="${b.start}">Open in planning</a></div>`; };
+    L.marker(p.ll,{icon}).addTo(map).bindPopup(`<b>${esc(p.visits.length>1?p.visits.map(b=>b.location).filter((v,i,a)=>a.indexOf(v)===i).join(' / '):b0.location)}</b><br><span style="color:var(--muted)">${esc(b0.country)} · ${nights} ${nights===1?'nacht':'nachten'}${p.visits.length>1?` · ${p.visits.length}× bezocht`:''}</span>${p.visits.map(visit).join('')}`,{maxWidth:300});
   });
-  map.on('popupopen',e=>{ const a=e.popup.getElement().querySelector('[data-jump]'); if(a) a.onclick=ev=>{ev.preventDefault(); state.tab='planning'; state.focusBlock=+a.dataset.jump; render();}; });
+  map.on('popupopen',e=>{ e.popup.getElement().querySelectorAll('[data-jump]').forEach(a=>a.onclick=ev=>{ev.preventDefault(); state.tab='planning'; state.focusBlock=+a.dataset.jump; render();}); });
   if(stops.length) map.fitBounds(L.latLngBounds(stops.map(s=>s.ll)).pad(0.08));
-  $('#mapNote').textContent = missing.length ? `Niet op de kaart (geen positie bekend): ${missing.join(', ')}. Geef een positie op via Planning → blok bewerken.` : 'Tik op een stip voor details. Nummers volgen de route.';
+  $('#mapCount').textContent=`${places.length} plekken`;
+  $('#mapNote').textContent = missing.length ? `Niet op de kaart (geen positie bekend): ${missing.join(', ')}. Geef een positie op via Planning → blok bewerken.` : 'Tik op een stip voor details. Nummers volgen de route; een plek die je twee keer aandoet is één stip.';
 }
 const prioChip = p => `<span class="chip ${p==='Urgent'||p==='Hoog'?'hoog':p==='Laag'?'laag':''}" ${p==='Urgent'?'style="background:var(--danger);color:#fff"':''}>${esc(p||'Middel')}</span>`;
 const todoSort=(a,b)=>(a.deadline||'9999').localeCompare(b.deadline||'9999')||(PRIO_N[a.prio]??2)-(PRIO_N[b.prio]??2);
