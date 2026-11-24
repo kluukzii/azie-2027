@@ -10,6 +10,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.97.0"></script>
 <script src="config.js"></script>
 <style>
@@ -120,7 +122,20 @@ table.t tfoot td{font-weight:600;border-bottom:0}
 .ribbon-legend i{width:10px;height:10px;border-radius:3px;background:var(--c);display:inline-block}
 .ribbon-tip{font-size:13px;color:var(--muted);min-height:20px;margin-top:8px}
 
+/* ---------- map ---------- */
+.map{height:min(70vh,520px);border-radius:var(--r-m);overflow:hidden;background:var(--surface-2);position:relative;z-index:0}
+.map .leaflet-container{font-family:var(--font-ui);background:var(--surface-2)}
+.stop{width:26px;height:26px;border-radius:50%;background:var(--c);color:#fff;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;font:600 12px var(--font-display);cursor:pointer}
+.stop.big{width:32px;height:32px;font-size:13px}
+.leaflet-popup-content-wrapper{border-radius:var(--r-m);background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.leaflet-popup-tip{background:var(--surface)}
+.leaflet-popup-content{margin:12px 14px;font-size:14px;line-height:1.4}
+.leaflet-popup-content b{font-family:var(--font-display);font-size:16px}
+.leaflet-control-attribution{font-size:10px;background:rgba(255,255,255,.7)}
+.map-note{font-size:13px;color:var(--muted);margin-top:8px}
+
 /* ---------- planning ---------- */
+.block>summary .meta button{margin-top:2px}
 .block{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);margin-bottom:10px;overflow:hidden}
 .block>summary{list-style:none;display:grid;grid-template-columns:6px 1fr auto;gap:14px;align-items:center;padding:14px 16px 14px 0;cursor:pointer}
 .block>summary::-webkit-details-marker{display:none}
@@ -129,6 +144,7 @@ table.t tfoot td{font-weight:600;border-bottom:0}
 .block>summary .ttl strong{font-family:var(--font-display);font-size:17px;font-weight:600}
 .block>summary .ttl span{color:var(--muted);font-size:13px}
 .block>summary .meta{text-align:right;color:var(--muted);font-size:13px;display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+@media (max-width:640px){.block>summary{grid-template-columns:6px 1fr}.block>summary .bar{grid-row:1/3}.block>summary .meta{grid-column:2;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap;padding-bottom:6px}}
 .block[open]>summary{border-bottom:1px solid var(--line)}
 .day{display:grid;grid-template-columns:64px 1fr;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);cursor:pointer}
 .day:last-child{border-bottom:0}
@@ -219,7 +235,10 @@ pre.code{background:var(--surface-2);padding:12px;border-radius:var(--r-s);overf
    Data & sync
    ===================================================================== */
 const CFG = window.PORTAL_CONFIG || {};
-const SECTIONS = ['meta','days','todos','flights','flightNotes','costs','tours'];
+const SECTIONS = ['meta','days','todos','flights','flightNotes','costs','tours','transport','packing','emergency'];
+const TODO_STATUS=['Open','Gepland','Afgerond'], TODO_PRIO=['Urgent','Hoog','Middel','Laag'], OWNERS=['','Luuk','Vera','Samen'];
+const PRIO_N={Urgent:0,Hoog:1,Middel:2,Laag:3};
+const isDone = t => /afgerond|done/i.test(t.status);
 const COUNTRY_VARS = {'china':'--c-china','japan':'--c-japan','vietnam':'--c-vietnam','maleisië':'--c-maleisie','maleisie':'--c-maleisie','indonesië':'--c-indonesie','indonesie':'--c-indonesie','nederland':'--c-nederland'};
 const state = { data:null, mode:'local', sb:null, dirty:new Set(), saving:false, tab:'overzicht', me:localStorage.getItem('portal.me')||'', lastBy:'', lastAt:'' };
 const $ = (s,el=document)=>el.querySelector(s);
@@ -258,6 +277,7 @@ async function init(){
         state.data = {};
         rows.forEach(r=>{ state.data[r.key]=r.data; if(!state.lastAt||r.updated_at>state.lastAt){state.lastAt=r.updated_at;state.lastBy=r.updated_by;} });
         SECTIONS.forEach(k=>{ if(state.data[k]===undefined) state.data[k]=k==='meta'||k==='tours'?{}:[]; });
+        if(!state.data.meta.start){ const seed=await loadSeed(); state.data.meta=seed.meta; }
       }
       state.sb.channel('portal').on('postgres_changes',{event:'*',schema:'public',table:'portal_sections'},p=>{
         const r=p.new; if(!r||!r.key) return;
@@ -324,6 +344,16 @@ function nightsByCountry(days){
   days.forEach(d=>{ if(d.type.toLowerCase().startsWith('terugreis')) return; m.set(d.country,(m.get(d.country)||0)+1); });
   return [...m].map(([country,nights])=>({country,nights}));
 }
+const PLACES=[['shanghai',31.2304,121.4737],['zhangjiajie',29.1170,110.4790],['chongqing',29.5630,106.5516],['lijiang',26.8721,100.2300],['dali',25.6065,100.2676],['kunming',25.0389,102.7183],['yangshuo',24.7784,110.4966],['guilin',25.2736,110.2900],['guangzhou',23.1291,113.2644],
+  ['osaka',34.6937,135.5023],['koyasan',34.2130,135.5850],['nara',34.6851,135.8048],['kyoto',35.0116,135.7681],['hiroshima',34.3853,132.4553],['miyajima',34.2960,132.3198],['hakone',35.2323,139.1069],['tokyo',35.6762,139.6503],
+  ['hanoi',21.0285,105.8542],['ninh binh',20.2506,105.9745],['hué',16.4637,107.5909],['hue',16.4637,107.5909],['hoi an',15.8801,108.3380],['da nang',16.0544,108.2022],['ho chi minh',10.8231,106.6297],['can tho',10.0452,105.7469],['mekong',10.0452,105.7469],
+  ['kota kinabalu',5.9804,116.0735],['sepilok',5.8745,117.9452],['sandakan',5.8402,118.1179],['kinabatangan',5.5167,118.2833],['kuala lumpur',3.1390,101.6869],
+  ['seminyak',-8.6913,115.1682],['canggu',-8.6478,115.1385],['labuan bajo',-8.4964,119.8877],['komodo',-8.4964,119.8877],['sidemen',-8.4700,115.4500],['ubud',-8.5069,115.2625],['uluwatu',-8.8291,115.0849],['bali',-8.6705,115.2126],['amsterdam',52.3105,4.7683]];
+function coordsFor(d){
+  if(d.lat!=null&&d.lng!=null&&d.lat!=='') return [+d.lat,+d.lng];
+  const n=(d.location||'').toLowerCase();
+  const hit=PLACES.find(p=>n.includes(p[0])); return hit?[hit[1],hit[2]]:null;
+}
 function tripPhase(){
   const {start,end}=state.data.meta, t=todayISO();
   if(t<start) return {phase:'before', days:Math.round((new Date(start)-new Date(t))/864e5)};
@@ -339,7 +369,7 @@ function renumber(){ // keep dates + day numbers consistent after insert/delete
 /* =====================================================================
    Rendering
    ===================================================================== */
-const TABS=[['overzicht','Overzicht'],['planning','Planning'],['todo','To-do'],['vluchten','Vluchten'],['kosten','Kosten'],['tours','Tours'],['instellingen','Instellingen']];
+const TABS=[['overzicht','Overzicht'],['planning','Planning'],['todo','To-do'],['vluchten','Vluchten'],['kosten','Kosten'],['tours','Tours'],['paklijst','Paklijst'],['vervoer','Vervoer'],['noodinfo','Noodinfo'],['instellingen','Instellingen']];
 function renderTabs(){
   $('#tabs').innerHTML=TABS.map(([k,l])=>`<button role="tab" data-tab="${k}" aria-selected="${state.tab===k}">${l}${k==='todo'&&state.data?`<span class="n" id="todoCount"></span>`:''}</button>`).join('');
   $('#tabs').onclick=e=>{ const b=e.target.closest('button'); if(!b) return; state.tab=b.dataset.tab; location.hash=state.tab; render(); window.scrollTo({top:0}); };
@@ -350,8 +380,8 @@ function render(){
   $('#title').textContent = d.meta.title || 'Azië 2027';
   $('#subtitle').textContent = `${fmtDate(d.meta.start,{day:'numeric',month:'long'})} – ${fmtDate(d.meta.end,{day:'numeric',month:'long',year:'numeric'})} · ${d.days.length-1} nachten`;
   renderTabs();
-  const open=d.todos.filter(t=>t.status!=='Done').length; const tc=$('#todoCount'); if(tc) tc.textContent=open;
-  ({overzicht:vOverzicht,planning:vPlanning,todo:vTodo,vluchten:vVluchten,kosten:vKosten,tours:vTours,instellingen:vInstellingen})[state.tab]();
+  const open=d.todos.filter(t=>!isDone(t)).length; const tc=$('#todoCount'); if(tc) tc.textContent=open;
+  ({overzicht:vOverzicht,planning:vPlanning,todo:vTodo,vluchten:vVluchten,kosten:vKosten,tours:vTours,paklijst:vPaklijst,vervoer:vVervoer,noodinfo:vNoodinfo,instellingen:vInstellingen})[state.tab]();
 }
 
 /* ---------- Overzicht ---------- */
@@ -359,12 +389,13 @@ function vOverzicht(){
   const d=state.data, ph=tripPhase(), t=todayISO();
   const nbc=nightsByCountry(d.days), total=nbc.reduce((a,b)=>a+b.nights,0);
   const bl=blocks(d.days);
-  const todos=d.todos, done=todos.filter(x=>x.status==='Done').length;
+  const todos=d.todos, done=todos.filter(isDone).length;
   const flights=d.flights, booked=flights.filter(f=>/geboekt/i.test(f.status)).length;
-  const est=d.costs.reduce((a,c)=>a+(+c.estimate||0),0), act=d.costs.reduce((a,c)=>a+(+c.actual||0),0);
-  const nextTodos=todos.filter(x=>x.status!=='Done').sort((a,b)=>({Hoog:0,Middel:1,Laag:2}[a.prio]??1)-({Hoog:0,Middel:1,Laag:2}[b.prio]??1)).slice(0,6);
+  const act=d.costs.reduce((a,c)=>a+(+c.actual||0),0), openCosts=d.costs.filter(c=>c.actual==null).length;
+  const nextTodos=todos.filter(x=>!isDone(x)).sort(todoSort).slice(0,6);
+  const nextDeadline=todos.filter(x=>!isDone(x)&&x.deadline).sort((a,b)=>a.deadline.localeCompare(b.deadline))[0];
   let head;
-  if(ph.phase==='before') head=`<div class="num">${ph.days}<small>dagen tot vertrek</small></div><div class="muted">Vertrek ${fmtDate(d.meta.start,{weekday:'long',day:'numeric',month:'long'})} naar ${esc(d.days[0]?.location||'')}</div>`;
+  if(ph.phase==='before') head=`<div class="num">${ph.days}<small>dagen tot vertrek</small></div><div class="muted">Vertrek ${fmtDate(d.meta.start,{weekday:'long',day:'numeric',month:'long'})}${d.meta.outbound?' · vlucht '+esc(d.meta.outbound.slice(0,10)===d.meta.start?d.meta.outbound.slice(11):fmtDate(d.meta.outbound.slice(0,10))+' '+d.meta.outbound.slice(11)):''} naar ${esc(d.days[0]?.location||'')}</div>${nextDeadline?`<div class="small" style="margin-top:10px"><span class="chip ${nextDeadline.deadline<t?'hoog':'warn'}">Deadline ${fmtDate(nextDeadline.deadline)}</span> ${esc(nextDeadline.task)}</div>`:''}`;
   else if(ph.phase==='during') head=`<div class="num">Dag ${ph.day?.day}<small>van ${d.days.length}</small></div><div class="muted">Vandaag in ${esc(ph.day?.location||'')}, ${esc(ph.day?.country||'')}</div>`;
   else head=`<div class="num">Thuis<small>de reis zit erop</small></div>`;
 
@@ -373,7 +404,7 @@ function vOverzicht(){
     <div class="card">${head}</div>
     <div class="card"><div class="spread"><h3>To-do's</h3><span class="muted small">${done} van ${todos.length} klaar</span></div>
       <div class="progress" style="margin:10px 0"><i style="width:${todos.length?done/todos.length*100:0}%"></i></div>
-      <div class="row small"><span class="chip">${todos.filter(x=>x.status==='Open').length} open</span><span class="chip warn">${todos.filter(x=>x.status==='Bezig').length} bezig</span><span class="chip ok">${done} done</span></div></div>
+      <div class="row small"><span class="chip">${todos.filter(x=>x.status==='Open').length} open</span><span class="chip warn">${todos.filter(x=>x.status==='Gepland').length} gepland</span><span class="chip ok">${done} afgerond</span>${todos.filter(x=>!isDone(x)&&x.deadline&&x.deadline<t).length?`<span class="chip hoog">${todos.filter(x=>!isDone(x)&&x.deadline&&x.deadline<t).length} over deadline</span>`:''}</div></div>
   </div>
   <div class="card" style="margin-bottom:14px">
     <div class="section-title"><h2>De route</h2><span class="muted small">${total} nachten in ${nbc.length} landen</span></div>
@@ -384,16 +415,18 @@ function vOverzicht(){
     <div class="ribbon-tip" id="ribbonTip">Beweeg over de balk of tik op een blok om naar die dagen te springen.</div>
     <div class="ribbon-legend">${nbc.map(c=>`<span><i style="--c:var(${countryVar(c.country)})"></i>${esc(c.country)} <span class="muted">${c.nights}</span></span>`).join('')}</div>
   </div>
+  <div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Waar we slapen</h2><span class="muted small">${bl.filter(b=>coordsFor(b.days[0])&&!/nederland/i.test(b.country)).length} stops</span></div>
+    <div class="map" id="map"></div><div class="map-note" id="mapNote"></div></div>
   <div class="grid cols-3" style="margin-bottom:14px">
     <div class="card"><h3>Vluchten</h3><div class="num" style="margin-top:8px">${booked}<small>van ${flights.length} geboekt</small></div>
       <div class="small muted" style="margin-top:6px">Betaald tot nu: ${fmtEur(flights.reduce((a,f)=>a+(/geboekt/i.test(f.status)?(+f.costTotal||0):0),0))}</div></div>
-    <div class="card"><h3>Kosten</h3><div class="num" style="margin-top:8px">${fmtEur(act)}<small>werkelijk</small></div>
-      <div class="small muted" style="margin-top:6px">Geschat ${fmtEur(est)} · ${d.costs.filter(c=>c.estimate==null).length} posten nog zonder schatting</div></div>
+    <div class="card"><h3>Kosten</h3><div class="num" style="margin-top:8px">${fmtEur(act)}<small>bekend · ${fmtEur(act/2)} p.p.</small></div>
+      <div class="small muted" style="margin-top:6px">${openCosts} posten nog zonder bedrag</div></div>
     <div class="card"><h3>Laatste wijziging</h3><div style="margin-top:8px">${state.lastBy?`<strong>${esc(state.lastBy)}</strong><div class="small muted">${new Date(state.lastAt).toLocaleString('nl-NL',{dateStyle:'medium',timeStyle:'short'})}</div>`:`<span class="muted">${state.mode==='local'?'Lokale modus':'Nog geen wijzigingen'}</span>`}</div></div>
   </div>
   <div class="grid cols-2">
     <div class="card"><div class="section-title"><h3>Eerst oppakken</h3><button class="btn sm" data-go="todo">Alle to-do's</button></div>
-      ${nextTodos.length?nextTodos.map(x=>`<div class="todo" data-todo="${x.id}"><input type="checkbox" aria-label="Afvinken" ${x.status==='Done'?'checked':''}><div class="tx"><div class="t">${esc(x.task)}</div><div class="m">${esc(x.category)}${x.timing?' · '+esc(x.timing):''}${x.owner?' · '+esc(x.owner):''}</div></div><div class="tags">${prioChip(x.prio)}</div></div>`).join(''):'<div class="empty">Alles is klaar 🎉</div>'}
+      ${nextTodos.length?nextTodos.map(x=>todoRow(x,t)).join(''):'<div class="empty">Alles is klaar 🎉</div>'}
     </div>
     <div class="card"><div class="section-title"><h3>Per land</h3><button class="btn sm" data-go="planning">Hele planning</button></div>
       <table class="t"><thead><tr><th>Land</th><th>Periode</th><th class="r">Nachten</th></tr></thead><tbody>${nbc.map(c=>{const ds=d.days.filter(x=>x.country===c.country);return `<tr><td><span class="chip country" style="background:var(${countryVar(c.country)})">${esc(c.country)}</span></td><td class="muted">${fmtDate(ds[0].date)} – ${fmtDate(ds[ds.length-1].date)}</td><td class="r">${c.nights}</td></tr>`;}).join('')}</tbody></table>
@@ -403,8 +436,29 @@ function vOverzicht(){
   $('#ribbon').onclick=e=>{ const b=e.target.closest('b'); if(!b) return; state.tab='planning'; state.focusBlock=+b.dataset.i; render(); };
   $('#view').querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{state.tab=b.dataset.go;render();});
   bindTodoRows();
+  drawMap(bl,t);
 }
-const prioChip = p => `<span class="chip ${p==='Hoog'?'hoog':p==='Laag'?'laag':''}">${esc(p||'Middel')}</span>`;
+function drawMap(bl,t){
+  const el=$('#map'); if(!el) return;
+  if(!window.L){ el.innerHTML='<div class="empty" style="border:0">Kaart kon niet laden (geen internet?)</div>'; return; }
+  const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme:dark)').matches);
+  const map=L.map(el,{scrollWheelZoom:false,attributionControl:true});
+  L.tileLayer(`https://{s}.basemaps.cartocdn.com/rastertiles/${dark?'dark_all':'voyager'}/{z}/{x}/{y}{r}.png`,{attribution:'© OpenStreetMap, © CARTO',maxZoom:18}).addTo(map);
+  const stops=bl.filter(b=>!/nederland/i.test(b.country)).map((b,i)=>({b,i:i+1,ll:coordsFor(b.days[0])})).filter(s=>s.ll);
+  const missing=bl.filter(b=>!/nederland/i.test(b.country)&&!coordsFor(b.days[0])).map(b=>b.location);
+  const style=getComputedStyle(document.documentElement);
+  L.polyline(stops.map(s=>s.ll),{color:style.getPropertyValue('--ink').trim()||'#333',weight:2,opacity:.5,dashArray:'4 6'}).addTo(map);
+  stops.forEach(s=>{
+    const b=s.b, first=b.days[0], last=b.days[b.days.length-1], acc=[...new Set(b.days.map(x=>x.accommodation).filter(Boolean))], link=b.days.map(x=>x.link).find(Boolean), now=b.days.some(x=>x.date===t);
+    const icon=L.divIcon({className:'',html:`<div class="stop ${now?'big':''}" style="--c:var(${countryVar(b.country)})">${s.i}</div>`,iconSize:[26,26],iconAnchor:[13,13]});
+    L.marker(s.ll,{icon}).addTo(map).bindPopup(`<b>${esc(b.location)}</b><br>${esc(b.country)} · ${fmtDate(first.date)}${b.days.length>1?' – '+fmtDate(last.date):''} · ${b.days.length} ${b.days.length===1?'nacht':'nachten'}${acc.length?`<br>🛏 ${esc(acc.join(', '))}${b.days.some(x=>x.accBooked)?' ✓':''}`:'<br><span style="color:var(--muted)">Nog geen accommodatie</span>'}${link?`<br><a href="${esc(link)}" target="_blank" rel="noopener">Link ↗</a>`:''}<br><a href="#" data-jump="${b.start}">Open in planning</a>`);
+  });
+  map.on('popupopen',e=>{ const a=e.popup.getElement().querySelector('[data-jump]'); if(a) a.onclick=ev=>{ev.preventDefault(); state.tab='planning'; state.focusBlock=+a.dataset.jump; render();}; });
+  if(stops.length) map.fitBounds(L.latLngBounds(stops.map(s=>s.ll)).pad(0.08));
+  $('#mapNote').textContent = missing.length ? `Niet op de kaart (geen positie bekend): ${missing.join(', ')}. Geef een positie op via Planning → blok bewerken.` : 'Tik op een stip voor details. Nummers volgen de route.';
+}
+const prioChip = p => `<span class="chip ${p==='Urgent'||p==='Hoog'?'hoog':p==='Laag'?'laag':''}" ${p==='Urgent'?'style="background:var(--danger);color:#fff"':''}>${esc(p||'Middel')}</span>`;
+const todoSort=(a,b)=>(a.deadline||'9999').localeCompare(b.deadline||'9999')||(PRIO_N[a.prio]??2)-(PRIO_N[b.prio]??2);
 
 /* ---------- Planning ---------- */
 function vPlanning(){
@@ -419,7 +473,7 @@ function vPlanning(){
     const isNow=b.days.some(x=>x.date===t), open=isNow||state.focusBlock===b.start||state.openBlocks?.has(b.start);
     return `<details class="block" data-b="${b.start}" ${open?'open':''} style="--c:var(${countryVar(b.country)})"><summary><span class="bar"></span>
       <span class="ttl"><strong>${esc(b.location)}</strong><span>${esc(b.country)} · ${fmtDate(first.date)}${b.days.length>1?' – '+fmtDate(last.date):''}</span></span>
-      <span class="meta"><span>${b.days.length} ${b.days.length===1?'nacht':'nachten'}</span>${acc.length?`<span class="chip ${b.days.some(x=>x.accBooked)?'ok':''}">${esc(acc.join(', '))}</span>`:''}</span></summary>
+      <span class="meta"><span>${b.days.length} ${b.days.length===1?'nacht':'nachten'}</span>${acc.length?`<span class="chip ${b.days.some(x=>x.accBooked)?'ok':''}">${b.days.some(x=>x.accBooked)?'✓ ':''}${esc(acc.join(', '))}</span>`:''}<button class="btn sm ghost" data-editblock="${b.start}">Blok bewerken</button></span></summary>
       ${b.days.map(x=>dayRow(x,t)).join('')}
     </details>`;
   }).join('')}`;
@@ -428,16 +482,39 @@ function vPlanning(){
   state.openBlocks=state.openBlocks||new Set();
   $('#view').querySelectorAll('details').forEach(el=>el.addEventListener('toggle',()=>{ el.open?state.openBlocks.add(+el.dataset.b):state.openBlocks.delete(+el.dataset.b); }));
   $('#view').querySelectorAll('.day').forEach(el=>el.onclick=()=>editDay(el.dataset.id));
+  $('#view').querySelectorAll('[data-editblock]').forEach(b=>b.onclick=e=>{ e.preventDefault(); e.stopPropagation(); editBlock(+b.dataset.editblock); });
   if(state.focusBlock!=null){ const el=$(`[data-b="${state.focusBlock}"]`); el?.scrollIntoView({behavior:'smooth',block:'start'}); state.focusBlock=null; }
 }
 function dayRow(x,t){
-  const travel=/reisdag|terugreis/i.test(x.type);
+  const travel=/reisdag|terugreis|tourdag/i.test(x.type);
   const extras=[x.ideas?`<span class="chip accent">${esc(x.ideas)}</span>`:'', x.link?`<a class="chip" href="${esc(x.link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">link ↗</a>`:'', x.accommodation?`<span class="chip ${x.accBooked?'ok':''}">${x.accBooked?'✓ ':''}${esc(x.accommodation)}</span>`:''].filter(Boolean).join('');
   return `<div class="day ${travel?'travel':''} ${x.date===t?'today':''}" data-id="${x.id}">
     <div class="d">${fmtDate(x.date)}<small>${weekday(x.date)} · dag ${x.day}</small></div>
-    <div class="body"><div class="ty">${esc(x.type)}${travel&&x.from?` · ${esc(x.from)} → ${esc(x.to)}`:''}</div>
+    <div class="body"><div class="ty">${esc(x.type)}${travel&&x.from?` · ${esc(x.from)} → ${esc(x.to)}`:''}${x.status?` <span class="chip ${/vast|geboekt/i.test(x.status)?'ok':/nog boeken|open/i.test(x.status)?'warn':''}" style="font-size:11px;padding:0 7px">${esc(x.status)}</span>`:''}</div>
       <div class="fx">${esc(x.focus||x.route||'')}${x.note?` <span class="muted">— ${esc(x.note)}</span>`:''}</div>
       ${extras?`<div class="ex">${extras}</div>`:''}</div></div>`;
+}
+function editBlock(start){
+  const d=state.data, b=blocks(d.days).find(x=>x.start===start); if(!b) return;
+  const first=b.days[0], last=b.days[b.days.length-1];
+  const countries=[...new Set(d.days.map(y=>y.country))];
+  const ll=coordsFor(first);
+  const v={location:b.location,country:b.country,status:first.status||'',accommodation:first.accommodation||b.days.map(x=>x.accommodation).find(Boolean)||'',link:b.days.map(x=>x.link).find(Boolean)||'',accBooked:b.days.some(x=>x.accBooked),latlng:first.lat!=null&&first.lat!==''?`${first.lat}, ${first.lng}`:''};
+  openSheet({
+    title:`${b.location} · ${fmtDate(first.date)}${b.days.length>1?' – '+fmtDate(last.date):''}`,
+    value:v,
+    fields:[{k:'location',l:'Locatie / plaats',t:'text',req:true},{k:'country',l:'Land',t:'select',opts:countries,free:true,half:true},{k:'status',l:'Status van dit blok',t:'select',opts:['','Flexibel','Richtdatum','Open','Nog boeken','Vast','Geboekt'],free:true,half:true},
+      {k:'accommodation',l:'Accommodatie (geldt voor alle nachten in dit blok)',t:'text'},{k:'link',l:'Link naar booking / hotel',t:'url'},{k:'accBooked',l:'Accommodatie is geboekt',t:'check'},
+      {k:'latlng',l:`Positie op de kaart (lat, lng)${ll&&!v.latlng?' – nu automatisch: '+ll.map(n=>n.toFixed(3)).join(', '):''}`,t:'text'}],
+    extra:[{label:`+ Nacht erbij (${b.days.length+1})`,fn:()=>{ const c={...last,id:uid('d'),type:'Verblijfsdag',from:'',to:'',route:'',ideas:'',link:''}; d.days.splice(start+b.days.length,0,c); renumber(); save('days','meta'); toast('Nacht toegevoegd – alles erna schuift een dag op'); }},
+      ...(b.days.length>1?[{label:`− Laatste nacht eraf (${b.days.length-1})`,fn:()=>{ d.days.splice(start+b.days.length-1,1); renumber(); save('days','meta'); toast('Nacht verwijderd – alles erna schuift een dag terug'); }}]:[])],
+    onSave:o=>{
+      let lat=null,lng=null; const m=o.latlng.match(/(-?\d+(?:[.,]\d+)?)\s*[, ]\s*(-?\d+(?:[.,]\d+)?)/); if(m){lat=+m[1].replace(',','.');lng=+m[2].replace(',','.');}
+      b.days.forEach(x=>{ x.location=o.location; x.country=o.country; x.status=o.status; x.accommodation=o.accommodation; x.accBooked=o.accBooked; x.lat=lat; x.lng=lng; });
+      if(o.link!==v.link){ b.days.forEach(x=>{ if(x.link===v.link) x.link=''; }); first.link=o.link; }
+      save('days');
+    }
+  });
 }
 function editDay(id){
   const d=state.data, i=d.days.findIndex(x=>x.id===id), x=d.days[i];
@@ -447,12 +524,13 @@ function editDay(id){
     value:x,
     fields:[
       {k:'location',l:'Locatie / overnachting',t:'text'},{k:'country',l:'Land',t:'select',opts:countries,free:true},
-      {k:'type',l:'Dagtype',t:'select',opts:['Reisdag + aankomst','Verblijfsdag','Rust-/verkenningsdag','Terugreis / aankomst']},
+      {k:'type',l:'Dagtype',t:'select',opts:['Reisdag + aankomst','Verblijfsdag','Rust-/verkenningsdag','Tourdag + terugkeer','Tourdag + vervolgroute','Terugreis'],free:true,half:true},
+      {k:'status',l:'Status',t:'select',opts:['','Flexibel','Richtdatum','Open','Nog boeken','Vast','Geboekt'],free:true,half:true},
       {k:'from',l:'Reis vanaf',t:'text',half:true},{k:'to',l:'Reis naar',t:'text',half:true},
       {k:'focus',l:'Focus / invulling',t:'textarea'},{k:'ideas',l:'Ideeën, restaurants, boekingen',t:'textarea'},{k:'link',l:'Link',t:'url'},
       {k:'accommodation',l:'Accommodatie',t:'text'},{k:'accBooked',l:'Accommodatie is geboekt',t:'check'},
       {k:'note',l:'Opmerking / keuze',t:'textarea'},{k:'weather',l:'Verwacht weer',t:'text'},{k:'route',l:'Route-impact',t:'text'}],
-    extra:[{label:'+ Nacht toevoegen na deze dag',fn:()=>{ const c={...x,id:uid('d'),type:'Verblijfsdag',from:'',to:'',route:'',ideas:'',link:'',accBooked:x.accBooked}; d.days.splice(i+1,0,c); renumber(); save('days','meta'); toast('Nacht toegevoegd – data zijn opgeschoven'); }}],
+    extra:[{label:'+ Nacht toevoegen na deze dag',fn:()=>{ const c={...x,id:uid('d'),type:'Verblijfsdag',from:'',to:'',route:'',ideas:'',link:'',accBooked:x.accBooked,status:x.status}; d.days.splice(i+1,0,c); renumber(); save('days','meta'); toast('Nacht toegevoegd – data zijn opgeschoven'); }}],
     onSave:v=>{ Object.assign(x,v); save('days'); },
     onDelete:()=>{ if(d.days.length<2) return; d.days.splice(i,1); renumber(); save('days','meta'); toast('Dag verwijderd – data zijn opgeschoven'); }
   });
@@ -460,18 +538,21 @@ function editDay(id){
 
 /* ---------- To-do ---------- */
 function vTodo(){
-  const d=state.data, f=state.todoFilter||(state.todoFilter={status:'open',cat:'',owner:'',q:''});
+  const d=state.data, t=todayISO(), f=state.todoFilter||(state.todoFilter={status:'open',cat:'',owner:'',q:''});
   const cats=[...new Set(d.todos.map(x=>x.category))].sort();
-  let list=d.todos.filter(x=> (f.status==='open'?x.status!=='Done':f.status==='done'?x.status==='Done':true) && (!f.cat||x.category===f.cat) && (!f.owner||x.owner===f.owner) && (!f.q||(x.task+' '+x.note+' '+x.outcome).toLowerCase().includes(f.q.toLowerCase())) );
-  const prioN={Hoog:0,Middel:1,Laag:2};
-  list.sort((a,b)=>a.category.localeCompare(b.category)||(prioN[a.prio]??1)-(prioN[b.prio]??1));
-  let html=`<div class="filters"><div class="seg" id="sf">${[['open','Open'],['done','Klaar'],['all','Alles']].map(([k,l])=>`<button aria-pressed="${f.status===k}" data-s="${k}">${l}</button>`).join('')}</div>
+  let list=d.todos.filter(x=> (f.status==='open'?!isDone(x):f.status==='done'?isDone(x):true) && (!f.cat||x.category===f.cat) && (!f.owner||x.owner===f.owner) && (!f.q||(x.task+' '+x.note+' '+x.outcome).toLowerCase().includes(f.q.toLowerCase())) );
+  list.sort(todoSort);
+  const overdue=list.filter(x=>!isDone(x)&&x.deadline&&x.deadline<t), soon=list.filter(x=>!isDone(x)&&x.deadline&&x.deadline>=t&&x.deadline<=addDays(t,14)), rest=list.filter(x=>!overdue.includes(x)&&!soon.includes(x));
+  let html=`<div class="filters"><div class="seg" id="sf">${[['open','Open'],['done','Afgerond'],['all','Alles']].map(([k,l])=>`<button aria-pressed="${f.status===k}" data-s="${k}">${l}</button>`).join('')}</div>
     <select id="catF"><option value="">Alle categorieën</option>${cats.map(c=>`<option ${f.cat===c?'selected':''}>${esc(c)}</option>`).join('')}</select>
-    <select id="ownF"><option value="">Iedereen</option>${['Luuk','Vera','Beiden'].map(c=>`<option ${f.owner===c?'selected':''}>${c}</option>`).join('')}</select>
+    <select id="ownF"><option value="">Iedereen</option>${OWNERS.filter(Boolean).map(c=>`<option ${f.owner===c?'selected':''}>${c}</option>`).join('')}</select>
     <input type="search" id="qF" placeholder="Zoeken…" value="${esc(f.q)}">
     <button class="btn primary sm" id="addTodo">+ Nieuw</button></div>`;
   if(!list.length) html+=`<div class="empty">Geen to-do's in deze selectie.</div>`;
-  else { let cat=null; html+=`<div class="card" style="padding:4px 0">`; list.forEach(x=>{ if(x.category!==cat){cat=x.category; html+=`<div class="cat-h">${esc(cat)}</div>`;} html+=todoRow(x); }); html+='</div>'; }
+  else {
+    const group=(title,arr,cls)=>arr.length?`<div class="cat-h" ${cls?`style="color:var(--${cls})"`:''}>${title}</div>${arr.map(x=>todoRow(x,t)).join('')}`:'';
+    html+=`<div class="card" style="padding:4px 0">${group('Over de deadline',overdue,'danger')}${group('Komende twee weken',soon,'warn')}${f.status==='open'?group(overdue.length||soon.length?'Daarna':'Alles',rest):rest.map(x=>todoRow(x,t)).join('')}</div>`;
+  }
   $('#view').innerHTML=html;
   $('#sf').onclick=e=>{const b=e.target.closest('button'); if(b){f.status=b.dataset.s; render();}};
   $('#catF').onchange=e=>{f.cat=e.target.value;render();}; $('#ownF').onchange=e=>{f.owner=e.target.value;render();};
@@ -479,50 +560,50 @@ function vTodo(){
   $('#addTodo').onclick=()=>editTodo(null);
   bindTodoRows();
 }
-function todoRow(x){
-  return `<div class="todo ${x.status==='Done'?'done':''}" data-todo="${x.id}"><input type="checkbox" aria-label="Afvinken" ${x.status==='Done'?'checked':''}>
-    <div class="tx"><div class="t">${esc(x.task)}</div><div class="m">${[x.timing,x.owner,x.note].filter(Boolean).map(esc).join(' · ')}${x.outcome?`<div>↳ ${esc(x.outcome)}</div>`:''}</div></div>
-    <div class="tags">${x.status==='Bezig'?'<span class="chip warn">bezig</span>':''}${prioChip(x.prio)}</div></div>`;
+function todoRow(x,t){
+  const dl=x.deadline?`<span class="${!isDone(x)&&x.deadline<t?'chip hoog':''}">${x.deadline<t&&!isDone(x)?'⚠ ':''}${fmtDate(x.deadline,{day:'numeric',month:'short',year:x.deadline.slice(0,4)!==t.slice(0,4)?'numeric':undefined})}</span>`:'';
+  return `<div class="todo ${isDone(x)?'done':''}" data-todo="${x.id}"><input type="checkbox" aria-label="Afvinken" ${isDone(x)?'checked':''}>
+    <div class="tx"><div class="t">${esc(x.task)}</div><div class="m">${[dl,esc(x.category),esc(x.owner),esc(x.note)].filter(Boolean).join(' · ')}${x.link?` · <a href="${esc(x.link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">link ↗</a>`:''}${x.outcome?`<div>↳ ${esc(x.outcome)}</div>`:''}</div></div>
+    <div class="tags">${x.status==='Gepland'?'<span class="chip warn">gepland</span>':''}${prioChip(x.prio)}</div></div>`;
 }
 function bindTodoRows(){
   $('#view').querySelectorAll('.todo').forEach(el=>{
     const x=state.data.todos.find(t=>t.id===el.dataset.todo); if(!x) return;
-    el.querySelector('input').onchange=e=>{ x.status=e.target.checked?'Done':'Open'; save('todos'); render(); };
+    el.querySelector('input').onchange=e=>{ x.status=e.target.checked?'Afgerond':'Open'; save('todos'); render(); };
     el.querySelector('.tx').onclick=()=>editTodo(x.id);
   });
 }
 function editTodo(id){
-  const d=state.data, x=id?d.todos.find(t=>t.id===id):{id:uid('t'),category:'',task:'',prio:'Middel',timing:'',status:'Open',owner:'',note:'',outcome:''};
+  const d=state.data, x=id?d.todos.find(t=>t.id===id):{id:uid('t'),category:'',task:'',prio:'Middel',deadline:'',status:'Open',owner:'Samen',note:'',link:'',outcome:''};
   const cats=[...new Set(d.todos.map(y=>y.category))].sort();
   openSheet({ title:id?'To-do bewerken':'Nieuwe to-do', value:x,
-    fields:[{k:'task',l:'Wat moet er gebeuren?',t:'text',req:true},{k:'category',l:'Categorie',t:'select',opts:cats,free:true,half:true},{k:'prio',l:'Prioriteit',t:'select',opts:['Hoog','Middel','Laag'],half:true},
-      {k:'status',l:'Status',t:'select',opts:['Open','Bezig','Done'],half:true},{k:'owner',l:'Wie',t:'select',opts:['','Luuk','Vera','Beiden'],half:true},{k:'timing',l:'Wanneer',t:'text'},{k:'note',l:'Opmerking',t:'textarea'},{k:'outcome',l:'Uitkomst',t:'textarea'}],
+    fields:[{k:'task',l:'Wat moet er gebeuren?',t:'text',req:true},{k:'category',l:'Categorie',t:'select',opts:cats,free:true,half:true},{k:'prio',l:'Prioriteit',t:'select',opts:TODO_PRIO,half:true},
+      {k:'status',l:'Status',t:'select',opts:TODO_STATUS,half:true},{k:'owner',l:'Wie',t:'select',opts:OWNERS,half:true},{k:'deadline',l:'Deadline',t:'date'},{k:'note',l:'Opmerking',t:'textarea'},{k:'link',l:'Link',t:'url'},{k:'outcome',l:'Uitkomst',t:'textarea'}],
     onSave:v=>{ Object.assign(x,v); if(!id) d.todos.push(x); save('todos'); },
     onDelete:id?()=>{ d.todos.splice(d.todos.indexOf(x),1); save('todos'); }:null });
 }
 
 /* ---------- Vluchten ---------- */
 function vVluchten(){
-  const d=state.data, fl=d.flights;
+  const d=state.data, fl=[...d.flights].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   const tot=fl.reduce((a,f)=>a+(+f.costTotal||0),0), booked=fl.filter(f=>/geboekt/i.test(f.status));
   $('#view').innerHTML=`<div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Vluchten</h2><div class="row"><span class="muted small">${booked.length} van ${fl.length} geboekt</span><button class="btn primary sm" id="addF">+ Vlucht</button></div></div>
-  <div class="tablewrap"><table class="t"><thead><tr><th>Van</th><th>Naar</th><th>Datum</th><th>Status</th><th>Maatschappij</th><th class="r">Totaal</th><th class="r">p.p.</th></tr></thead>
-  <tbody>${fl.map(f=>`<tr class="click" data-id="${f.id}"><td>${esc(f.from)}</td><td>${esc(f.to)}</td><td class="muted">${f.date?fmtDate(f.date):''}</td><td>${statusChip(f.status)}</td><td class="muted">${esc(f.airline)}</td><td class="r">${fmtEur(f.costTotal)}</td><td class="r muted">${fmtEur(f.costPP)}</td></tr>`).join('')}</tbody>
-  <tfoot><tr><td colspan="5">Totaal (ingevulde bedragen)</td><td class="r">${fmtEur(tot)}</td><td class="r muted">${fmtEur(tot/2)}</td></tr></tfoot></table></div></div>
-  <div class="card"><div class="section-title"><h3>Rekensommetje terugvlucht</h3><button class="btn sm" id="addN">+ Regel</button></div>
-  <table class="t"><tbody>${d.flightNotes.map((n,i)=>`<tr class="click" data-n="${i}"><td>${esc(n.label)}</td><td class="r">${fmtEur(n.amount)}</td></tr>`).join('')}</tbody></table></div>`;
+  <div class="tablewrap"><table class="t"><thead><tr><th>Datum</th><th>Route</th><th>Tijden</th><th>Status</th><th>Code</th><th class="r">Totaal</th><th class="r">p.p.</th></tr></thead>
+  <tbody>${fl.map(f=>`<tr class="click" data-id="${f.id}"><td style="white-space:nowrap">${f.date?fmtDate(f.date):'<span class="muted">—</span>'}</td><td><strong>${esc(f.from)} → ${esc(f.to)}</strong>${f.routePref?`<div class="small muted">${esc(f.routePref)}</div>`:''}${f.note?`<div class="small muted">${esc(f.note)}</div>`:''}</td><td class="muted" style="white-space:nowrap">${f.depTime?esc(f.depTime)+' – '+esc(f.arrTime):esc(f.duration||'')}</td><td>${statusChip(f.status)}</td><td><code>${esc(f.code||'')}</code></td><td class="r">${fmtEur(f.costTotal)}</td><td class="r muted">${fmtEur(f.costPP)}</td></tr>`).join('')}</tbody>
+  <tfoot><tr><td colspan="5">Totaal geboekt</td><td class="r">${fmtEur(tot)}</td><td class="r muted">${fmtEur(tot/2)}</td></tr></tfoot></table></div></div>
+  ${d.flightNotes.length?`<div class="card"><h3>Rekensommetje</h3><table class="t"><tbody>${d.flightNotes.map((n,i)=>`<tr class="click" data-n="${i}"><td>${esc(n.label)}</td><td class="r">${fmtEur(n.amount)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
   $('#view').querySelectorAll('tr[data-id]').forEach(tr=>tr.onclick=()=>editFlight(tr.dataset.id));
   $('#addF').onclick=()=>editFlight(null);
   $('#view').querySelectorAll('tr[data-n]').forEach(tr=>tr.onclick=()=>editNote(+tr.dataset.n));
-  $('#addN').onclick=()=>editNote(null);
 }
-const statusChip = s => /geboekt/i.test(s)?`<span class="chip ok">${esc(s)}</span>`:/optie/i.test(s)?`<span class="chip warn">${esc(s)}</span>`:`<span class="chip">${esc(s||'Nog te boeken')}</span>`;
+const statusChip = s => /geboekt|betaald|vast|geregeld|gereed/i.test(s)?`<span class="chip ok">${esc(s)}</span>`:/optie|onderweg|gepland|richtdatum/i.test(s)?`<span class="chip warn">${esc(s)}</span>`:/cadeau/i.test(s)?`<span class="chip accent">${esc(s)}</span>`:`<span class="chip">${esc(s||'Nog te boeken')}</span>`;
 function editFlight(id){
-  const d=state.data, x=id?d.flights.find(f=>f.id===id):{id:uid('f'),from:'',to:'',date:'',airline:'',status:'Nog te boeken',costTotal:null,costPP:null,note:''};
+  const d=state.data, x=id?d.flights.find(f=>f.id===id):{id:uid('f'),date:'',from:'',to:'',depTime:'',arrTime:'',status:'Onderweg boeken',bookingType:'',code:'',costTotal:null,costPP:null,routePref:'',duration:'',airline:'',note:''};
   openSheet({ title:id?'Vlucht bewerken':'Nieuwe vlucht', value:x,
-    fields:[{k:'from',l:'Van',t:'text',half:true,req:true},{k:'to',l:'Naar',t:'text',half:true,req:true},{k:'date',l:'Datum',t:'date',half:true},{k:'status',l:'Status',t:'select',opts:['Nog te boeken','Optie','Geboekt'],half:true},
-      {k:'airline',l:'Maatschappij / vluchtnummer',t:'text'},{k:'costTotal',l:'Kosten totaal (€)',t:'number',half:true},{k:'costPP',l:'Kosten p.p. (€)',t:'number',half:true},{k:'note',l:'Opmerking',t:'textarea'}],
-    onSave:v=>{ if(v.costTotal!=null&&(v.costPP==null||v.costPP===0)) v.costPP=+(v.costTotal/2).toFixed(2); Object.assign(x,v); if(!id) d.flights.push(x); save('flights'); },
+    fields:[{k:'from',l:'Van',t:'text',half:true,req:true},{k:'to',l:'Naar',t:'text',half:true,req:true},{k:'date',l:'Datum',t:'date',half:true},{k:'status',l:'Status',t:'select',opts:['Onderweg boeken','Nog te boeken','Optie','Geboekt'],free:true,half:true},
+      {k:'depTime',l:'Vertrek (uu:mm)',t:'text',half:true},{k:'arrTime',l:'Aankomst (uu:mm)',t:'text',half:true},{k:'code',l:'Boekingscode',t:'text',half:true},{k:'airline',l:'Maatschappij / vluchtnr',t:'text',half:true},
+      {k:'costTotal',l:'Kosten totaal (€)',t:'number',half:true},{k:'costPP',l:'Kosten p.p. (€)',t:'number',half:true},{k:'routePref',l:'Voorkeursroute / luchthavens',t:'text'},{k:'duration',l:'Indicatieve reistijd',t:'text'},{k:'note',l:'Opmerking',t:'textarea'}],
+    onSave:v=>{ if(v.costTotal!=null&&!v.costPP) v.costPP=+(v.costTotal/2).toFixed(2); Object.assign(x,v); if(!id) d.flights.push(x); save('flights'); },
     onDelete:id?()=>{ d.flights.splice(d.flights.indexOf(x),1); save('flights'); }:null });
 }
 function editNote(i){
@@ -536,35 +617,35 @@ function vKosten(){
   const d=state.data, cs=d.costs, cats=[...new Set(cs.map(c=>c.category))];
   const sum=(arr,k)=>arr.reduce((a,c)=>a+(+c[k]||0),0);
   $('#view').innerHTML=`<div class="grid cols-3" style="margin-bottom:14px">
-    <div class="card"><div class="muted small">Geschat totaal</div><div class="num">${fmtEur(sum(cs,'estimate'))}</div></div>
-    <div class="card"><div class="muted small">Werkelijk (geboekt)</div><div class="num">${fmtEur(sum(cs,'actual'))}</div></div>
-    <div class="card"><div class="muted small">Nog zonder schatting</div><div class="num">${cs.filter(c=>c.estimate==null).length}<small>posten</small></div></div></div>
-  <div class="card"><div class="section-title"><h2>Financiële plaatje</h2><button class="btn primary sm" id="addC">+ Post</button></div>
-  <div class="tablewrap"><table class="t"><thead><tr><th>Post</th><th class="r">Schatting</th><th class="r">Werkelijk</th><th class="r">Verschil</th></tr></thead>
-  ${cats.map(cat=>{const rows=cs.filter(c=>c.category===cat); return `<tbody><tr><td colspan="4" style="padding-top:16px;color:var(--muted);font-family:var(--font-display);font-weight:600">${esc(cat)}</td></tr>${rows.map(c=>`<tr class="click" data-id="${c.id}"><td>${esc(c.item)}${c.note?`<div class="small muted">${esc(c.note)}</div>`:''}</td><td class="r">${fmtEur(c.estimate)}</td><td class="r">${fmtEur(c.actual)}</td><td class="r muted">${c.estimate!=null&&c.actual!=null?fmtEur(c.actual-c.estimate):''}</td></tr>`).join('')}
-  <tr><td class="muted small">Subtotaal ${esc(cat)}</td><td class="r small">${fmtEur(sum(rows,'estimate'))}</td><td class="r small">${fmtEur(sum(rows,'actual'))}</td><td></td></tr></tbody>`;}).join('')}
-  <tfoot><tr><td>Totaal</td><td class="r">${fmtEur(sum(cs,'estimate'))}</td><td class="r">${fmtEur(sum(cs,'actual'))}</td><td></td></tr></tfoot></table></div>
-  <p class="small muted" style="margin:12px 0 0">Bedragen zoals in je Excel: vluchten per persoon, de rest zoals je ze zelf invult. Zet in de opmerking bij een post of het p.p. of totaal is.</p></div>`;
+    <div class="card"><div class="muted small">Bekende grote kosten</div><div class="num">${fmtEur(sum(cs,'actual'))}</div></div>
+    <div class="card"><div class="muted small">Per persoon</div><div class="num">${fmtEur(sum(cs,'actual')/2)}</div></div>
+    <div class="card"><div class="muted small">Nog zonder bedrag</div><div class="num">${cs.filter(c=>c.actual==null).length}<small>posten</small></div></div></div>
+  <div class="card"><div class="section-title"><h2>Kostenoverzicht</h2><button class="btn primary sm" id="addC">+ Post</button></div>
+  <div class="tablewrap"><table class="t"><thead><tr><th>Post</th><th>Status</th><th class="r">Totaal</th><th class="r">p.p.</th></tr></thead>
+  ${cats.map(cat=>{const rows=cs.filter(c=>c.category===cat); return `<tbody><tr><td colspan="4" style="padding-top:16px;color:var(--muted);font-family:var(--font-display);font-weight:600">${esc(cat)}</td></tr>${rows.map(c=>`<tr class="click" data-id="${c.id}"><td><strong>${esc(c.item)}</strong>${c.route?` <span class="muted">· ${esc(c.route)}</span>`:''}${c.note?`<div class="small muted">${esc(c.note)}</div>`:''}${c.link?`<div class="small"><a href="${esc(c.link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">link ↗</a></div>`:''}</td><td>${statusChip(c.status)}</td><td class="r">${fmtEur(c.actual)}</td><td class="r muted">${fmtEur(c.costPP??(c.actual!=null?c.actual/2:null))}</td></tr>`).join('')}
+  <tr><td class="muted small" colspan="2">Subtotaal ${esc(cat)}</td><td class="r small">${fmtEur(sum(rows,'actual'))}</td><td class="r small muted">${fmtEur(sum(rows,'actual')/2)}</td></tr></tbody>`;}).join('')}
+  <tfoot><tr><td colspan="2">Totaal</td><td class="r">${fmtEur(sum(cs,'actual'))}</td><td class="r">${fmtEur(sum(cs,'actual')/2)}</td></tr></tfoot></table></div></div>`;
   $('#view').querySelectorAll('tr[data-id]').forEach(tr=>tr.onclick=()=>editCost(tr.dataset.id));
   $('#addC').onclick=()=>editCost(null);
 }
 function editCost(id){
-  const d=state.data, x=id?d.costs.find(c=>c.id===id):{id:uid('c'),item:'',category:'Overig',estimate:null,actual:null,note:''};
+  const d=state.data, x=id?d.costs.find(c=>c.id===id):{id:uid('c'),item:'',route:'',category:'Overig',status:'Nog boeken',estimate:null,actual:null,costPP:null,note:'',link:''};
   openSheet({ title:id?'Kostenpost bewerken':'Nieuwe kostenpost', value:x,
-    fields:[{k:'item',l:'Post',t:'text',req:true},{k:'category',l:'Categorie',t:'select',opts:['Vluchten','Verblijf','Leefgeld','Tours','Overig'],free:true},{k:'estimate',l:'Schatting (€)',t:'number',half:true},{k:'actual',l:'Werkelijk (€)',t:'number',half:true},{k:'note',l:'Opmerking',t:'textarea'}],
-    onSave:v=>{ Object.assign(x,v); if(!id) d.costs.push(x); save('costs'); }, onDelete:id?()=>{ d.costs.splice(d.costs.indexOf(x),1); save('costs'); }:null });
+    fields:[{k:'item',l:'Post',t:'text',req:true},{k:'route',l:'Route / locatie',t:'text'},{k:'category',l:'Categorie',t:'select',opts:['Vluchten','Verblijf','Tours','Leefgeld','Overig'],free:true,half:true},{k:'status',l:'Status',t:'select',opts:['Nog boeken','Onderweg boeken','Open','Geboekt','Betaald','Cadeau'],free:true,half:true},
+      {k:'actual',l:'Kosten totaal (€)',t:'number',half:true},{k:'costPP',l:'Kosten p.p. (€)',t:'number',half:true},{k:'note',l:'Opmerking',t:'textarea'},{k:'link',l:'Bron / boekingslink',t:'url'}],
+    onSave:v=>{ if(v.actual!=null&&!v.costPP) v.costPP=+(v.actual/2).toFixed(2); Object.assign(x,v); if(!id) d.costs.push(x); save('costs'); }, onDelete:id?()=>{ d.costs.splice(d.costs.indexOf(x),1); save('costs'); }:null });
 }
 
 /* ---------- Tours ---------- */
 function vTours(){
   const t=state.data.tours;
-  const card=(x,kind,i)=>`<div class="card tour ${x.chosen?'chosen':''}" data-k="${kind}" data-i="${i}"><div class="spread"><h3>${esc(x.duration)}</h3>${x.chosen?'<span class="chip accent">gekozen</span>':''}</div>
-    <dl class="kv">${kind==='borneo'?`<dt>Prijs</dt><dd>${esc(x.price)}</dd><dt>Boekbaar</dt><dd>${esc(x.bookable)}</dd>`:`<dt>Kosten</dt><dd>${esc(x.cost)}</dd><dt>Slapen</dt><dd>${esc(x.sleep)}</dd><dt>Eten</dt><dd>${esc(x.food)}</dd><dt>Programma</dt><dd>${esc(x.activities)}</dd><dt>Overig</dt><dd>${esc(x.other)}</dd><dt>Score</dt><dd>${esc(x.score)}</dd>`}
-    ${x.note?`<dt>Notitie</dt><dd>${esc(x.note)}</dd>`:''}</dl>
-    <div class="row" style="margin-top:12px">${x.link?`<a class="btn sm" href="${esc(x.link)}" target="_blank" rel="noopener">Bekijk aanbieder ↗</a>`:''}<button class="btn sm ghost" data-edit>Bewerken</button></div></div>`;
+  const card=(x,kind,i)=>`<div class="card tour ${x.chosen?'chosen':''}" data-k="${kind}" data-i="${i}"><div class="spread"><h3>${esc(x.duration)}</h3>${x.chosen?'<span class="chip accent">onze keuze</span>':''}</div>
+    <dl class="kv">${x.dates?`<dt>Data</dt><dd>${esc(x.dates)}</dd>`:''}${kind==='borneo'?`${x.price?`<dt>Prijs</dt><dd>${esc(x.price)}</dd>`:''}<dt>Status</dt><dd>${esc(x.bookable)}</dd>`:`${x.cost?`<dt>Kosten</dt><dd>${esc(x.cost)}</dd>`:''}${x.score?`<dt>Status</dt><dd>${esc(x.score)}</dd>`:''}${x.sleep?`<dt>Slapen</dt><dd>${esc(x.sleep)}</dd>`:''}${x.food?`<dt>Eten</dt><dd>${esc(x.food)}</dd>`:''}${x.activities?`<dt>Programma</dt><dd>${esc(x.activities)}</dd>`:''}${x.other?`<dt>Let op</dt><dd>${esc(x.other)}</dd>`:''}`}
+    ${x.note?`<dt>Details</dt><dd>${esc(x.note)}</dd>`:''}</dl>
+    <div class="row" style="margin-top:12px">${x.link?`<a class="btn sm" href="${esc(x.link)}" target="_blank" rel="noopener">Bekijk boeking / aanbieder ↗</a>`:''}<button class="btn sm ghost" data-edit>Bewerken</button></div></div>`;
   $('#view').innerHTML=`<div class="section-title"><h2>Borneo jungletour (Kinabatangan)</h2><button class="btn primary sm" data-add="borneo">+ Optie</button></div>
     ${t.borneoNote?`<p class="muted small" style="margin:-4px 0 12px">${esc(t.borneoNote)}</p>`:''}
-    <div class="grid cols-3" style="margin-bottom:28px">${(t.borneo||[]).map((x,i)=>card(x,'borneo',i)).join('')||'<div class="empty">Nog geen opties</div>'}</div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));margin-bottom:28px">${(t.borneo||[]).map((x,i)=>card(x,'borneo',i)).join('')||'<div class="empty">Nog geen opties</div>'}</div>
     <div class="section-title"><h2>Komodo-tour (Labuan Bajo)</h2><button class="btn primary sm" data-add="komodo">+ Optie</button></div>
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr))">${(t.komodo||[]).map((x,i)=>card(x,'komodo',i)).join('')||'<div class="empty">Nog geen opties</div>'}</div>`;
   $('#view').querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{const c=b.closest('.tour'); editTour(c.dataset.k,+c.dataset.i);});
@@ -572,13 +653,87 @@ function vTours(){
 }
 function editTour(kind,i){
   const t=state.data.tours; t[kind]=t[kind]||[];
-  const x=i!=null?t[kind][i]:(kind==='borneo'?{duration:'',price:'',bookable:'',link:'',note:'',chosen:false}:{duration:'',activities:'',food:'',sleep:'',cost:'',other:'',link:'',score:'',note:'',chosen:false});
-  const fields=kind==='borneo'?[{k:'duration',l:'Duur / naam',t:'text',req:true},{k:'price',l:'Prijs',t:'text'},{k:'bookable',l:'Boekbaar',t:'text'},{k:'link',l:'Link',t:'url'},{k:'note',l:'Notitie',t:'textarea'},{k:'chosen',l:'Dit is onze keuze',t:'check'}]
-    :[{k:'duration',l:'Duur / vertrek',t:'text',req:true},{k:'cost',l:'Kosten',t:'text'},{k:'sleep',l:'Slapen',t:'text'},{k:'food',l:'Eten',t:'text'},{k:'activities',l:'Programma',t:'textarea'},{k:'other',l:'Overig / exclusief',t:'textarea'},{k:'link',l:'Link',t:'url'},{k:'score',l:'Score / oordeel',t:'text'},{k:'note',l:'Notitie',t:'textarea'},{k:'chosen',l:'Dit is onze keuze',t:'check'}];
+  const x=i!=null?t[kind][i]:(kind==='borneo'?{duration:'',dates:'',price:'',bookable:'',link:'',note:'',chosen:false}:{duration:'',dates:'',activities:'',food:'',sleep:'',cost:'',other:'',link:'',score:'',note:'',chosen:false});
+  const fields=kind==='borneo'?[{k:'duration',l:'Tour / aanbieder',t:'text',req:true},{k:'dates',l:'Data',t:'text',half:true},{k:'price',l:'Prijs',t:'text',half:true},{k:'bookable',l:'Status / boekbaar',t:'text'},{k:'link',l:'Link',t:'url'},{k:'note',l:'Details',t:'textarea'},{k:'chosen',l:'Dit is onze keuze',t:'check'}]
+    :[{k:'duration',l:'Tour / aanbieder',t:'text',req:true},{k:'dates',l:'Data',t:'text',half:true},{k:'cost',l:'Kosten',t:'text',half:true},{k:'score',l:'Status / oordeel',t:'text'},{k:'sleep',l:'Slapen',t:'text'},{k:'food',l:'Eten',t:'text'},{k:'activities',l:'Programma',t:'textarea'},{k:'other',l:'Let op / exclusief',t:'textarea'},{k:'link',l:'Link',t:'url'},{k:'note',l:'Details',t:'textarea'},{k:'chosen',l:'Dit is onze keuze',t:'check'}];
   openSheet({ title:i!=null?'Optie bewerken':'Nieuwe optie', value:x, fields,
     onSave:v=>{ if(v.chosen) t[kind].forEach(o=>o.chosen=false); Object.assign(x,v); if(i==null) t[kind].push(x); save('tours'); },
     onDelete:i!=null?()=>{ t[kind].splice(i,1); save('tours'); }:null });
 }
+
+/* ---------- Paklijst ---------- */
+function vPaklijst(){
+  const d=state.data, pk=d.packing||[], f=state.packFilter||(state.packFilter={status:'todo',q:''});
+  const ok=x=>/geregeld|n\.v\.t/i.test(x.status);
+  let list=pk.filter(x=>(f.status==='todo'?!ok(x):f.status==='done'?ok(x):true)&&(!f.q||(x.item+' '+x.note+' '+x.category).toLowerCase().includes(f.q.toLowerCase())));
+  const cats=[...new Set(list.map(x=>x.category))];
+  const done=pk.filter(ok).length;
+  $('#view').innerHTML=`<div class="filters"><div class="seg" id="pf">${[['todo','Nog doen'],['done','Geregeld'],['all','Alles']].map(([k,l])=>`<button aria-pressed="${f.status===k}" data-s="${k}">${l}</button>`).join('')}</div>
+    <input type="search" id="pq" placeholder="Zoeken…" value="${esc(f.q)}"><span class="muted small">${done} van ${pk.length} geregeld</span><button class="btn primary sm" id="addP">+ Item</button></div>
+    <div class="progress" style="margin-bottom:14px"><i style="width:${pk.length?done/pk.length*100:0}%"></i></div>
+    ${list.length?`<div class="card" style="padding:4px 0">${cats.map(c=>`<div class="cat-h">${esc(c)}</div>${list.filter(x=>x.category===c).map(x=>`<div class="todo ${ok(x)?'done':''}" data-p="${x.id}"><input type="checkbox" aria-label="Geregeld" ${ok(x)?'checked':''}><div class="tx"><div class="t">${esc(x.item)}</div><div class="m">${[x.type,x.who,x.note].filter(Boolean).map(esc).join(' · ')}</div></div><div class="tags">${statusChip(x.status)}</div></div>`).join('')}`).join('')}</div>`:'<div class="empty">Niets gevonden.</div>'}`;
+  $('#pf').onclick=e=>{const b=e.target.closest('button'); if(b){f.status=b.dataset.s; render();}};
+  $('#pq').oninput=e=>{f.q=e.target.value; render(); const q=$('#pq'); q.focus(); q.setSelectionRange(q.value.length,q.value.length);};
+  $('#addP').onclick=()=>editPack(null);
+  $('#view').querySelectorAll('[data-p]').forEach(el=>{ const x=pk.find(y=>y.id===el.dataset.p);
+    el.querySelector('input').onchange=e=>{ x.status=e.target.checked?'Geregeld':'Nog regelen'; save('packing'); render(); };
+    el.querySelector('.tx').onclick=()=>editPack(x.id); });
+}
+function editPack(id){
+  const d=state.data; d.packing=d.packing||[];
+  const x=id?d.packing.find(p=>p.id===id):{id:uid('p'),category:'',item:'',type:'Meenemen',status:'Nog regelen',who:'Beiden',note:''};
+  const cats=[...new Set(d.packing.map(y=>y.category))];
+  openSheet({ title:id?'Item bewerken':'Nieuw item', value:x,
+    fields:[{k:'item',l:'Item',t:'text',req:true},{k:'category',l:'Categorie',t:'select',opts:cats,free:true,half:true},{k:'type',l:'Type',t:'select',opts:['Meenemen','Kopen','Regelen','Check','Installeren/testen'],free:true,half:true},
+      {k:'status',l:'Status',t:'select',opts:['Nog regelen','Nog checken','Gepland','Geregeld','N.v.t.'],free:true,half:true},{k:'who',l:'Voor wie',t:'select',opts:['Beiden','Samen','Luuk','Vera'],half:true},{k:'note',l:'Opmerking',t:'textarea'}],
+    onSave:v=>{ Object.assign(x,v); if(!id) d.packing.push(x); save('packing'); }, onDelete:id?()=>{ d.packing.splice(d.packing.indexOf(x),1); save('packing'); }:null });
+}
+
+/* ---------- Vervoer (China) ---------- */
+function vVervoer(){
+  const d=state.data, tr=d.transport||[];
+  $('#view').innerHTML=`<div class="section-title"><h2>Vervoer binnen China</h2><button class="btn primary sm" id="addT">+ Traject</button></div>
+  <p class="muted small" style="margin:-4px 0 14px">Per traject de voorkeur, het alternatief en wanneer je het moet regelen. Klik op een traject om het bij te werken.</p>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr))">${tr.map(x=>`<div class="card tour" data-t="${x.id}" style="cursor:pointer"><div class="spread"><h3>${esc(x.leg)}</h3>${statusChip(x.status)}</div>
+    <dl class="kv"><dt>Voorkeur</dt><dd><strong>${esc(x.preferred)}</strong></dd><dt>Alternatief</dt><dd>${esc(x.alternative)}</dd><dt>Reistijd</dt><dd>${esc(x.duration)}</dd><dt>Boeken</dt><dd>${esc(x.whenToBook)}</dd>${x.note?`<dt>Opmerking</dt><dd>${esc(x.note)}</dd>`:''}</dl>
+    ${x.link?`<div style="margin-top:10px"><a class="btn sm" href="${esc(x.link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Bron ↗</a></div>`:''}</div>`).join('')||'<div class="empty">Nog geen trajecten</div>'}</div>`;
+  $('#view').querySelectorAll('[data-t]').forEach(el=>el.onclick=()=>editTransport(el.dataset.t));
+  $('#addT').onclick=()=>editTransport(null);
+}
+function editTransport(id){
+  const d=state.data; d.transport=d.transport||[];
+  const x=id?d.transport.find(t=>t.id===id):{id:uid('tr'),leg:'',preferred:'',alternative:'',duration:'',whenToBook:'',status:'In kaart gebracht',note:'',link:''};
+  openSheet({ title:id?'Traject bewerken':'Nieuw traject', value:x,
+    fields:[{k:'leg',l:'Traject',t:'text',req:true},{k:'preferred',l:'Voorkeur',t:'text',half:true},{k:'alternative',l:'Alternatief',t:'text',half:true},{k:'duration',l:'Indicatieve reistijd',t:'text'},{k:'whenToBook',l:'Wanneer boeken',t:'text'},
+      {k:'status',l:'Status',t:'select',opts:['In kaart gebracht','Optie','Geboekt'],free:true},{k:'note',l:'Opmerking',t:'textarea'},{k:'link',l:'Bron',t:'url'}],
+    onSave:v=>{ Object.assign(x,v); if(!id) d.transport.push(x); save('transport'); }, onDelete:id?()=>{ d.transport.splice(d.transport.indexOf(x),1); save('transport'); }:null });
+}
+
+/* ---------- Noodinfo ---------- */
+function vNoodinfo(){
+  const d=state.data, em=d.emergency||[];
+  const todo=em.filter(x=>/invullen/i.test(x.status)||/NOG INVULLEN/i.test(x.org+x.phone+x.address));
+  const groups=[['Privé','Eigen gegevens'],['Medisch','Medisch'],['BZ 24/7','Buitenlandse Zaken 24/7'],['Consulair','Ambassades en consulaten']];
+  const row=x=>{const miss=/NOG INVULLEN/i.test(x.org+x.phone+x.address); return `<div class="todo" data-e="${x.id}" style="grid-template-columns:1fr auto;cursor:pointer"><div class="tx"><div class="t">${esc(x.subject)}${x.org&&!/NOG INVULLEN/i.test(x.org)?` <span class="muted">· ${esc(x.org)}</span>`:''}</div>
+    <div class="m">${miss?'<span class="chip hoog">nog invullen</span>':`${x.phone?`📞 ${esc(x.phone)}`:''}${x.address?`<div>${esc(x.address)}</div>`:''}`}${x.source?` <a href="${esc(x.source)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">bron ↗</a>`:''}</div></div><div class="tags">${statusChip(x.status)}</div></div>`;};
+  $('#view').innerHTML=`<div class="section-title"><h2>Noodinformatie</h2><button class="btn primary sm" id="addE">+ Regel</button></div>
+    ${d.meta.emergencyNote?`<p class="muted small" style="margin:-4px 0 14px">${esc(d.meta.emergencyNote)}</p>`:''}
+    ${todo.length?`<div class="banner">Nog ${todo.length} ${todo.length===1?'regel':'regels'} in te vullen vóór vertrek: ${todo.map(x=>esc(x.subject)).join(', ')}.</div>`:''}
+    ${groups.map(([k,l])=>{const rows=em.filter(x=>x.type===k); return rows.length?`<div class="card" style="padding:4px 0;margin-bottom:12px"><div class="cat-h">${l}</div>${rows.map(row).join('')}</div>`:'';}).join('')}
+    ${em.filter(x=>!groups.some(g=>g[0]===x.type)).length?`<div class="card" style="padding:4px 0"><div class="cat-h">Overig</div>${em.filter(x=>!groups.some(g=>g[0]===x.type)).map(row).join('')}</div>`:''}`;
+  $('#view').querySelectorAll('[data-e]').forEach(el=>el.onclick=()=>editEmergency(el.dataset.e));
+  $('#addE').onclick=()=>editEmergency(null);
+}
+function editEmergency(id){
+  const d=state.data; d.emergency=d.emergency||[];
+  const x=id?d.emergency.find(e=>e.id===id):{id:uid('e'),type:'Privé',subject:'',org:'',phone:'',address:'',status:'Nog invullen',source:''};
+  openSheet({ title:id?'Noodinformatie bewerken':'Nieuwe regel', value:x,
+    fields:[{k:'subject',l:'Onderwerp',t:'text',req:true},{k:'type',l:'Type',t:'select',opts:['Privé','Medisch','BZ 24/7','Consulair'],free:true,half:true},{k:'status',l:'Status',t:'select',opts:['Nog invullen','Gereed'],half:true},
+      {k:'org',l:'Organisatie / persoon',t:'text'},{k:'phone',l:'Telefoon / gegevens',t:'text'},{k:'address',l:'Adres / polis / extra',t:'textarea'},{k:'source',l:'Officiële bron',t:'url'}],
+    onSave:v=>{ if(v.status==='Nog invullen'&&v.org&&v.phone&&!/NOG INVULLEN/i.test(v.org+v.phone)) v.status='Gereed'; Object.assign(x,v); if(!id) d.emergency.push(x); save('emergency'); },
+    onDelete:id?()=>{ d.emergency.splice(d.emergency.indexOf(x),1); save('emergency'); }:null });
+}
+
 
 /* ---------- Instellingen ---------- */
 function vInstellingen(){
@@ -588,9 +743,9 @@ function vInstellingen(){
     <h3 style="margin-top:22px">Weergave</h3><div class="seg" id="theme" style="margin-top:8px">${[['auto','Automatisch'],['light','Licht'],['dark','Donker']].map(([k,l])=>`<button aria-pressed="${(localStorage.getItem('portal.theme')||'auto')===k}" data-t="${k}">${l}</button>`).join('')}</div></div>
   <div class="card"><h3>Opslag</h3><dl class="kvs" style="margin-top:10px"><dt>Modus</dt><dd>${state.mode==='supabase'?'Supabase (gedeeld)':'Lokaal (alleen deze browser)'}</dd><dt>Project</dt><dd>${esc(CFG.supabaseUrl||'—')}</dd><dt>Laatste wijziging</dt><dd>${state.lastBy?esc(state.lastBy)+' · '+new Date(state.lastAt).toLocaleString('nl-NL'):'—'}</dd></dl>
     <div class="row" style="margin-top:14px"><button class="btn sm" id="exp">Download back-up (data.json)</button><label class="btn sm">Herstel uit back-up <input type="file" accept="application/json" id="imp" hidden></label></div>
-    <p class="small muted" style="margin:12px 0 0">Tip: download af en toe een back-up. Herstellen overschrijft alles.</p></div>
+    <p class="small muted" style="margin:12px 0 0">Tip: download af en toe een back-up. Herstellen overschrijft alles (ook bij Vera). Een nieuwe <code>data.json</code> uit de Excel laad je ook via <em>Herstel uit back-up</em>.</p></div>
   <div class="card"><h3>Reis</h3><form id="metaForm" style="margin-top:10px;display:grid;gap:12px"><div class="field"><label>Titel</label><input name="title" value="${esc(d.meta.title)}"></div><div class="field"><label>Vertrekdatum (verschuift alle dagen)</label><input type="date" name="start" value="${esc(d.meta.start)}"></div><button class="btn primary sm" style="justify-self:start">Opslaan</button></form></div>
-  <div class="card"><h3>Over dit portaal</h3><p class="small muted">Gebouwd uit <em>Reisplanning_Azie_21feb_27mei_2027.xlsx</em>. Statische site op GitHub Pages; data in één Supabase-tabel (<code>portal_sections</code>). Zie de README in de repo voor installatie en het SQL-script.</p></div>
+  <div class="card"><h3>Over dit portaal</h3><p class="small muted">Gebouwd uit <em>Sabbatical_Planning.xlsx</em>. Statische site op GitHub Pages; data in één Supabase-tabel (<code>portal_sections</code>). Zie de README in de repo voor installatie en het SQL-script.</p></div>
   </div>`;
   $('#chMe').onclick=()=>{pickMe();render();};
   $('#theme').onclick=e=>{const b=e.target.closest('button'); if(!b) return; const t=b.dataset.t; localStorage.setItem('portal.theme',t); applyTheme(); render();};
